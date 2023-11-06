@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: network-qos
+  namespace: network-qos
+  labels:
+    app: network-qos
+spec:
+  selector:
+    matchLabels:
+      app: network-qos
+  template:
+    metadata:
+      labels:
+        app: network-qos
+    spec:
+      containers:
+      - name: network-qos
+        image: ubuntu
+        command: ['bash', '/scripts/wrapper.sh']
+        securityContext:
+          privileged: true
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - SYS_MODULE
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - mountPath: /host/lib
+          name: host-lib
+        - mountPath: /host/bin
+          name: host-bin
+        - mountPath: /host/sbin
+          name: host-sbin
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+      volumes:
+      - configMap:
+          name: network-qos-scripts
+        name: scripts
+      - hostPath:
+          path: /lib
+        name: host-lib
+      - hostPath:
+          path: /bin
+        name: host-bin
+      - hostPath:
+          path: /sbin
+        name: host-sbin

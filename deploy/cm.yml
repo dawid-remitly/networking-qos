@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: network-qos-scripts
+  namespace: network-qos
+data:
+  tc-thin.sh: |
+    #!/bin/bash
+
+    set -eux -o pipefail
+
+    IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
+
+    # change mtu, bring up iface
+    ifconfig ifb0 mtu 9001
+    ifconfig ifb0 up
+
+    # delete qdisc
+    tc qdisc del dev eth0 root || true
+    tc qdisc del dev eth0 ingress || true
+    tc qdisc del dev ifb0 root || true
+
+    # redirect ingress from eth0 to egress on ifb0
+    tc qdisc add dev eth0 handle ffff: ingress
+    tc filter add dev eth0 parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev ifb0
+
+    # downlink
+    tc qdisc replace dev ifb0 root handle 1: htb default 30 r2q 20
+      tc class add dev ifb0 parent 1:0 classid 1:1 htb rate 3000mbit ceil 3000mbit
+        tc class add dev ifb0 parent 1:1 classid 1:10 htb rate 100mbit ceil 2000mbit prio 1
+          tc qdisc add dev ifb0 parent 1:10 handle 110: fq_codel quantum 300
+        tc class add dev ifb0 parent 1:1 classid 1:30 htb rate 100mbit ceil 2000mbit prio 3
+          tc qdisc add dev ifb0 parent 1:30 handle 130: fq_codel quantum 300
+        tc class add dev ifb0 parent 1:1 classid 1:40 htb rate 100mbit ceil  200mbit prio 4
+          tc qdisc add dev ifb0 parent 1:40 handle 140: fq_codel quantum 300
+
+    tc filter add dev ifb0 parent 1:0 protocol ip prio 1 u32 match ip sport 53 0xffff flowid 1:10
+    tc filter add dev ifb0 parent 1:0 protocol ip prio 3 u32 match ip dst $IP/32 match ip src 10.0.0.0/8 flowid 1:30
+    tc filter add dev ifb0 parent 1:0 protocol ip prio 4 u32 match ip dst $IP/32 flowid 1:40
+
+    # uplink
+    tc qdisc replace dev eth0 root handle 2: htb default 30 r2q 20
+      tc class add dev eth0 parent 2:0 classid 2:1 htb rate 3000mbit ceil 3000mbit
+        tc class add dev eth0 parent 2:1 classid 2:10 htb rate 100mbit ceil 2000mbit prio 1
+          tc qdisc add dev eth0 parent 2:10 handle 110: fq_codel quantum 300
+        tc class add dev eth0 parent 2:1 classid 2:30 htb rate 100mbit ceil 2000mbit prio 3
+          tc qdisc add dev eth0 parent 2:30 handle 130: fq_codel quantum 300
+        tc class add dev eth0 parent 2:1 classid 2:40 htb rate 100mbit ceil  200mbit prio 4
+          tc qdisc add dev eth0 parent 2:40 handle 140: fq_codel quantum 300
+
+    tc filter add dev eth0 parent 2:0 protocol ip prio 1 u32 match ip dport 53 0xffff flowid 2:10
+    tc filter add dev eth0 parent 2:0 protocol ip prio 3 u32 match ip src $IP/32 match ip dst 10.0.0.0/8 flowid 2:30
+    tc filter add dev eth0 parent 2:0 protocol ip prio 4 u32 match ip src $IP/32 flowid 2:40
+  wrapper.sh: |
+    #!/bin/bash
+
+    set -eu -o pipefail
+
+    export PATH=$PATH:/host/sbin:/host/bin
+
+    trap 'quit=1' SIGTERM
+
+    echo "Inserting mod ifb.ko"
+    lsmod | grep '^ifb ' || {
+      insmod $(find /host/lib/ -name ifb.ko) numifbs=1
+    }
+
+    echo "Inserting mod sch_fq_codel.ko"
+    lsmod | grep '^sch_fq_codel ' || {
+      insmod $(find /host/lib/ -name sch_fq_codel.ko) 2>/dev/null || true
+    }
+
+    echo "Installing dependencies"
+    apt update
+    apt install -y iproute2 net-tools
+
+    echo "Loading tc-thin.sh"
+    bash /scripts/tc-thin.sh
+
+
+    quit=0
+    while [ "$quit" -ne 1 ]; do
+        sleep 1
+    done
+
+    echo "Received SIGTERM."
+
+    # delete qdisc
+    echo "Deleting qdisc from eth0, ifb0"
+    tc qdisc del dev eth0 root || true
+    tc qdisc del dev eth0 ingress || true
+    tc qdisc del dev ifb0 root || true
+
+    # restore default qdisc
+    tc qdisc replace mq 0: dev eth0 root
+    tc qdisc add pfifo_fast 0: dev eth0 parent :8 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :7 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :6 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :5 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :4 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :3 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :2 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    tc qdisc add pfifo_fast 0: dev eth0 parent :1 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+
+    sleep 60
